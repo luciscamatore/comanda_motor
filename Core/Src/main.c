@@ -49,6 +49,9 @@
 #define R  0.05
 #define LX 0.094
 #define LY 0.126
+#define MAX_SPEED 12.5
+#define MIN_SPEED 8.0
+#define DISTANCE_THRESHOLD 0.1
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -146,6 +149,18 @@ void Controller_Init(Controller *ps4){
 	ps4->x = 0;
 }
 
+typedef struct{
+	double fdr, fst, sdr, sst, max_speed, scale_factor;
+}WHEELS;
+
+void Wheels__Init(WHEELS *wheels) {
+	wheels->fdr = 0;
+	wheels->fst = 0;
+	wheels->sdr = 0;
+	wheels->sst = 0;
+	wheels->max_speed = 0;
+	wheels->scale_factor = 0;
+};
 //COORDINATES STRUCT
 /*TODO: Coordinates struct if needed?*/
 /*
@@ -269,6 +284,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 		current_h = (double) ((int) (coordinates[2] * 100)) / 100;
 //		process_data();
 //		HAL_UART_Transmit(&huart2, (uint8_t*) tx_buffer,25, HAL_MAX_DELAY);
+	}
+	if (huart == &huart3) {
+		HAL_UART_Receive_DMA(&huart3, live_follower_buffer, 25);
 	}
 }
 
@@ -410,54 +428,62 @@ double final_x = 0, final_y = 0;
 double points[2][2] = { { 100, 0.0 },
 						{ 100, 100.0 } };
 
-double w_fdr = 0, w_fst = 0, w_sdr = 0, w_sst = 0;
-double max_speed = 0, scale_factor = 0;
+WHEELS wheels;
 void calculate_speed(double Vx, double Vy, double Wz){
 	//pentru directia rotilor ne luam dupa asta https://www.itm-conferences.org/articles/itmconf/pdf/2020/05/itmconf_itee2020_04001.pdf
-	w_fst = ((1 / R) * (Vx - Vy - ((LX + LY) * Wz))) / 40;
-	w_fdr = ((1 / R) * (Vx + Vy + ((LX + LY) * Wz))) / 40;
-	w_sst = ((1 / R) * (Vx + Vy - ((LX + LY) * Wz))) / 40;
-	w_sdr = ((1 / R) * (Vx - Vy + ((LX + LY) * Wz))) / 40;
+	wheels.fst = ((1 / R) * (Vx - Vy - ((LX + LY) * Wz))) / 40;
+	wheels.fdr = ((1 / R) * (Vx + Vy + ((LX + LY) * Wz))) / 40;
+	wheels.sst = ((1 / R) * (Vx + Vy - ((LX + LY) * Wz))) / 40;
+	wheels.sdr = ((1 / R) * (Vx - Vy + ((LX + LY) * Wz))) / 40;
 
-	max_speed = fmax(fmax(fabs(w_fst), fabs(w_fdr)), fmax(fabs(w_sst), fabs(w_sdr)));
-	if( max_speed > 12.5){
-		scale_factor = fabs(12.5 / max_speed);
-		w_fst *= scale_factor;
-		w_fdr *= scale_factor;
-		w_sst *= scale_factor;
-		w_sdr *= scale_factor;
-	}else if(max_speed < 8.0){
-		scale_factor = fabs(8.0 / max_speed);
-		w_fst *= scale_factor;
-		w_fdr *= scale_factor;
-		w_sst *= scale_factor;
-		w_sdr *= scale_factor;
+	wheels.max_speed = fmax(fmax(fabs(wheels.fst), fabs(wheels.fdr)), fmax(fabs(wheels.sst), fabs(wheels.sdr)));
+	if( wheels.max_speed > MAX_SPEED){
+		wheels.scale_factor = fabs(MAX_SPEED / wheels.max_speed);
+		wheels.fst *= wheels.scale_factor;
+		wheels.fdr *= wheels.scale_factor;
+		wheels.sst *= wheels.scale_factor;
+		wheels.sdr *= wheels.scale_factor;
+	}else if(wheels.max_speed < MIN_SPEED){
+		wheels.scale_factor = fabs(MIN_SPEED / wheels.max_speed);
+		wheels.fst *= wheels.scale_factor;
+		wheels.fdr *= wheels.scale_factor;
+		wheels.sst *= wheels.scale_factor;
+		wheels.sdr *= wheels.scale_factor;
 
 	}
 
-	w_fst = rad2rpm(w_fst);
-	w_fdr = rad2rpm(w_fdr);
-	w_sst = rad2rpm(w_sst);
-	w_sdr = rad2rpm(w_sdr);
+	wheels.fst = rad2rpm(wheels.fst);
+	wheels.fdr = rad2rpm(wheels.fdr);
+	wheels.sst = rad2rpm(wheels.sst);
+	wheels.sdr = rad2rpm(wheels.sdr);
 
 
 }
 /*TODO: Movement error corection*/
-/*TODO: Fa ceva cu asta fratelo*/
 double Vx = 0, Vy = 0;
-void follow_trajectory(double final_x, double final_y) {
+void follow_line(double final_x, double final_y) {
 	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
-	if (current_x < final_x) {
+	while (true) {
 		Vx = final_x - current_x;
 		Vy = final_y - current_y;
 
+		double distance_to_target = sqrt(Vx * Vx + Vy * Vy);
+
+		if (distance_to_target < DISTANCE_THRESHOLD) {
+			break;
+		}
+
 		calculate_speed(Vx, Vy, 0);
-		run_motors(w_fdr, w_sdr, w_fst, w_sst);
+		run_motors(wheels.fdr, wheels.sdr, wheels.fst, wheels.sst);
 	}
-	if(current_x > final_x){
-		stop_motors();
+	stop_motors();
+}
+
+void follow_trajectory() {
+	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
+	for (int i = 0; i < 2; i++) {
+		follow_line(points[i][0], points[i][1]);
 	}
-//	stop_motors();
 }
 /*TODO: Heading locking*/
 //double Kp = 0.2;
@@ -568,8 +594,10 @@ int main(void)
 	MOTOR_Init(&sdr);
 	MOTOR_Init(&sst);
 	Controller_Init(&ps4);
+	Wheels__Init(&wheels);
 
 	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
+	HAL_UART_Receive_DMA(&huart3, live_follower_buffer, 15);
 //	process_data();
 //	HAL_UART_Transmit_DMA(&huart2, (uint8_t *) tx_buffer, 25);
 //	follow_trajectory();
@@ -581,7 +609,7 @@ int main(void)
 	/*TODO: Implement mode switching*/
 
 	while (1) {
-//		follow_trajectory(100, 0);
+		follow_trajectory();
 //		process_data();
 //		sprintf(msg, "e alo %d \r\n", x);
 //		HAL_UART_Transmit(&huart2, (uint8_t *) tx_buffer, 25, HAL_MAX_DELAY);
@@ -592,7 +620,7 @@ int main(void)
 //		tele_op_mode();
 //		if (HAL_GPIO_ReadPin(GPIOF, GPIO_PIN_7)) {
 //			//TELEOP
-			tele_op_mode();
+//			tele_op_mode();
 //		} else if (HAL_GPIO_ReadPin(GPIOF, GPIO_PIN_8)) {
 //			//AUTO OP MODE
 //			follow_trajectory();
