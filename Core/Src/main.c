@@ -44,14 +44,17 @@
 #define PWM_UPPER_LIMIT 65535
 #define PWM_LOWER_LIMIT 10000
 #define TICKS_PER_REVOLUTION 1120
-#define DISTANCE_THRESHOLD 10
-#define MAX_BUFFER_SIZE 25
 #define R  0.05
 #define LX 0.094
 #define LY 0.126
+
+#define MAX_BUFFER_SIZE 25
+
 #define MAX_SPEED 12.5
 #define MIN_SPEED 8.0
-#define DISTANCE_THRESHOLD 0.1
+#define DISTANCE_THRESHOLD 1
+
+#define NUM_OF_POINTS 4
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -425,11 +428,15 @@ void tele_op_mode() {
 //double points[3][2] = { { 1.6, 0.0 }, { 1.6, -1.1 }, { 0.0, -1.1 } };
 //double speeds[3][4] = { { 35, 35, 35, 35 }, { 35, -35, -35, 35 }, { -35, -35, -35, -35 } };
 double final_x = 0, final_y = 0;
-double points[2][2] = { { 100, 0.0 },
-						{ 100, 100.0 } };
+double points[NUM_OF_POINTS][2] = { { 100, 0.0 },
+						{ 100, 100.0 },
+                        { 0.0, 100.0 },
+                        { 0.0, 0.0 }};
+
+int visited[NUM_OF_POINTS] = {0, 0, 0, 0};
 
 WHEELS wheels;
-void calculate_speed(double Vx, double Vy, double Wz){
+void compute_wheel_speeds(double Vx, double Vy, double Wz){
 	//pentru directia rotilor ne luam dupa asta https://www.itm-conferences.org/articles/itmconf/pdf/2020/05/itmconf_itee2020_04001.pdf
 	wheels.fst = ((1 / R) * (Vx - Vy - ((LX + LY) * Wz))) / 40;
 	wheels.fdr = ((1 / R) * (Vx + Vy + ((LX + LY) * Wz))) / 40;
@@ -473,7 +480,7 @@ void follow_line(double final_x, double final_y) {
 			break;
 		}
 
-		calculate_speed(Vx, Vy, 0);
+		compute_wheel_speeds(Vx, Vy, 0);
 		run_motors(wheels.fdr, wheels.sdr, wheels.fst, wheels.sst);
 	}
 	stop_motors();
@@ -481,8 +488,11 @@ void follow_line(double final_x, double final_y) {
 
 void follow_trajectory() {
 	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
-	for (int i = 0; i < 2; i++) {
-		follow_line(points[i][0], points[i][1]);
+	for (int i = 0; i < NUM_OF_POINTS; i++) {
+		if(!visited[i]){
+			follow_line(points[i][0], points[i][1]);
+			visited[i] = 1;
+		}
 	}
 }
 /*TODO: Heading locking*/
