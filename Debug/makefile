@@ -61,7 +61,7 @@ main-build: comanda_motor.elf secondary-outputs
 
 # Tool invocations
 comanda_motor.elf comanda_motor.map: $(OBJS) $(USER_OBJS) D:\Programs\stm32CubeIDE\WorkSpace\comanda_motor\STM32F412ZGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "comanda_motor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\Programs\stm32CubeIDE\WorkSpace\comanda_motor\STM32F412ZGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="comanda_motor.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
+	arm-none-eabi-gcc -o "comanda_motor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"D:\Programs\stm32CubeIDE\WorkSpace\comanda_motor\STM32F412ZGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="comanda_motor.map" -Wl,--gc-sections -static -Wl,--no-warn-rwx-segment --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

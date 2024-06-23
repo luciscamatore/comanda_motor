@@ -49,12 +49,16 @@
 #define LY 0.126
 
 #define MAX_BUFFER_SIZE 25
+#define MAX_TRAJECTORY_SIZE 8
+#define MAX_CONTROLLER_SIZE 15
+#define MAX_ODOMETRY_SIZE 25
+
 
 #define MAX_SPEED 12.5
 #define MIN_SPEED 8.0
 #define DISTANCE_THRESHOLD 1
 
-#define NUM_OF_POINTS 4
+#define NUM_OF_POINTS 5
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -75,6 +79,7 @@ UART_HandleTypeDef huart3;
 UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart3_rx;
+DMA_HandleTypeDef hdma_usart3_tx;
 DMA_HandleTypeDef hdma_usart6_rx;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
@@ -107,8 +112,120 @@ static void MX_TIM12_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/***************************************
+ ********* TYPEDEFS STRUCTS ************
+ ***************************************/
+//MOTOR STRUCT
+typedef struct {
+	int32_t position, old_position;
+	int32_t speed;
+	double speed_rpm, speed_rad;
+} MOTOR;
 
-//USEFUL FUNCTIONS
+void MOTOR_Init(MOTOR *motor) {
+	motor->position = 0;
+	motor->old_position = 0;
+	motor->speed = 0;
+	motor->speed_rpm = 0;
+	motor->speed_rad = 0;
+}
+
+//CONTROLLER STRUCT
+typedef struct {
+	int w, y, x;
+} Controller;
+
+void Controller_Init(Controller *ps4) {
+	ps4->w = 0;
+	ps4->y = 0;
+	ps4->x = 0;
+}
+//WHEELS STRUCT
+typedef struct {
+	double fdr, fst, sdr, sst, max_speed, scale_factor;
+} WHEELS;
+
+void Wheels_Init(WHEELS *wheels) {
+	wheels->fdr = 0;
+	wheels->fst = 0;
+	wheels->sdr = 0;
+	wheels->sst = 0;
+	wheels->max_speed = 0;
+	wheels->scale_factor = 0;
+}
+
+//LIVE FOLLOWER STRUCT
+typedef struct {
+	double target_x, target_y, last_target_x, last_target_y;
+	bool in_teleop_mode;
+	bool in_live_mode;
+	bool is_stopped;
+} LIVE_FOLLOWER;
+
+void LIVE_FOLLOWER_Init(LIVE_FOLLOWER *live_follower) {
+	live_follower->target_x = 0;
+	live_follower->target_y = 0;
+	live_follower->last_target_x = 0;
+	live_follower->last_target_y = 0;
+	live_follower->in_teleop_mode = false;
+	live_follower->in_live_mode = false;
+	live_follower->is_stopped = false;
+}
+//COORDINATES STRUCT
+typedef struct {
+	double current_x, current_y, current_h;
+} ODO;
+
+void ODO_Init(ODO *odometer) {
+	odometer->current_x = 0;
+	odometer->current_y = 0;
+	odometer->current_h = 0;
+}
+
+//PID STRUCT
+typedef struct {
+	float Kp;
+	float Ki;
+	float Kd;
+	float prevError;
+	float integral;
+	float maxIntegral;
+} PID;
+
+void PID_Init(PID *pid, float kp, float ki, float kd) {
+	pid->Kp = kp;
+	pid->Ki = ki;
+	pid->Kd = kd;
+	pid->integral = 0;
+	pid->prevError = 0;
+	pid->maxIntegral = 65535;
+}
+
+/***************************************
+ ********* STRUCTS DECLARATIONS ********
+ ***************************************/
+PID fdr_controller, fst_controller, sdr_controller, sst_controller;
+MOTOR fdr, fst, sdr, sst;
+WHEELS wheels;
+LIVE_FOLLOWER live_follower;
+ODO odometer;
+Controller ps4;
+
+//LIVE FOLLOWER BUFFER
+uint8_t trajectory_buffer[MAX_TRAJECTORY_SIZE];
+
+//TELEOP VARIABLES
+uint8_t controller_buffer[MAX_CONTROLLER_SIZE];
+
+//ODOMETRY VARIABLES
+uint8_t odometry_buffer[MAX_ODOMETRY_SIZE];
+
+//BUFFER TO SEND DATA TO HC-05
+char tx_buffer[MAX_BUFFER_SIZE];
+
+/***************************************
+ ********* HELPER FUNCTIONS ************
+ ***************************************/
 char msg[400];
 double map(long x, long in_min, long in_max, long out_min, long out_max) {
 	return (double) (x - in_min) * (out_max - out_min) / (in_max - in_min)
@@ -124,77 +241,12 @@ double rad2deg(double rad) {
 	return (rad * (180.0 / M_PI)) - ((int) (rad * (180.0 / M_PI) / 360) * 360);
 }
 float rad2rpm(float rad) {
-    return roundf((rad * 60) / (2 * M_PI));
-}
-//MOTOR STRUCT
-typedef struct{
-	int32_t position, old_position;
-	int speed;
-	float speed_rpm, speed_rad;
-}MOTOR;
-
-void MOTOR_Init(MOTOR *motor){
-	motor->position = 0;
-	motor->old_position = 0;
-	motor->speed = 0;
-	motor->speed_rpm = 0;
-	motor->speed_rad = 0;
+	return roundf((rad * 60) / (2 * M_PI));
 }
 
-//CONTROLLER STRUCT
-typedef struct{
-	int w, y, x;
-}Controller;
-
-void Controller_Init(Controller *ps4){
-	ps4->w = 0;
-	ps4->y = 0;
-	ps4->x = 0;
-}
-
-typedef struct{
-	double fdr, fst, sdr, sst, max_speed, scale_factor;
-}WHEELS;
-
-void Wheels__Init(WHEELS *wheels) {
-	wheels->fdr = 0;
-	wheels->fst = 0;
-	wheels->sdr = 0;
-	wheels->sst = 0;
-	wheels->max_speed = 0;
-	wheels->scale_factor = 0;
-};
-//COORDINATES STRUCT
-/*TODO: Coordinates struct if needed?*/
-/*
-typedef struct{
-	double current_x, current_y, current_h;
-} ODO;
-
-void ODO_Init(ODO *odometer){
-	odometer->current_x = 0;
-	odometer->current_y = 0;
-	odometer->current_h = 0;
-}
-*/
-
-//LIVE FOLLOWER BUFFER
-uint8_t live_follower_buffer[25];
-
-//TELEOP VARIABLES
-Controller ps4;
-uint8_t controller_buffer[15];
-
-//ODOMETRY VARIABLES
-uint8_t odometry_buffer[25];
-char tx_buffer[MAX_BUFFER_SIZE];
 int chars_written = 0;
-double current_x = 0, current_y = 0, current_h = 0;
-
-
 void process_data() {
-	chars_written = snprintf(tx_buffer, MAX_BUFFER_SIZE, "%+.2f,%+.2f,%+.2f\n",
-			current_x, current_y, current_h);
+	chars_written = snprintf(tx_buffer, MAX_BUFFER_SIZE, "%+.2f,%+.2f,%+.2f\n", odometer.current_x, odometer.current_y, odometer.current_h);
 	if (chars_written < 0 || chars_written > MAX_BUFFER_SIZE) {
 		/*TODO: handle error*/
 	} else {
@@ -205,59 +257,84 @@ void process_data() {
 	tx_buffer[MAX_BUFFER_SIZE - 1] = '\0';
 }
 
-int small_counter = 0, big_counter = 0;
-MOTOR fdr, fst, sdr, sst;
+int32_t computeCommand(PID *pid, float setPoint, int speed) {
+	int32_t output = 0;
+	//calculam eroarea
+	float error = abs(setPoint) - speed;
+	//calculam integrala
+	pid->integral += error;
+	//anti windup
+	if (pid->integral > pid->maxIntegral) {
+		pid->integral = pid->maxIntegral;
+	} else if (pid->integral < -pid->maxIntegral) {
+		pid->integral = -pid->maxIntegral;
+	}
+
+	//calculam comanda
+	output = pid->Kp * error + pid->Ki * pid->integral;
+	if (output > 65535)
+		output = 65535;
+	HAL_Delay(100);
+
+	if (setPoint < 0) {
+		output *= -1;
+	} else if (setPoint > 0) {
+		output *= 1;
+	}
+	return output;
+}
+
+/***************************************
+ ********* CALLBACK FUNCTIONS **********
+ ***************************************/
+double time = 0.0;
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if (htim == &htim9) {
 		//fdr
 		fdr.position = __HAL_TIM_GET_COUNTER(&htim1);
 		fdr.speed = fdr.position - fdr.old_position;
-		fdr.speed_rpm = (fdr.speed * 60) / TICKS_PER_REVOLUTION;
+		fdr.speed_rpm = (double)((fdr.speed * 60.0) / 1120.0);
 		fdr.speed_rad = (fdr.speed_rpm / 60) * 2 * M_PI;
 		fdr.old_position = fdr.position;
 
 		//fst
-		fst.position = __HAL_TIM_GET_COUNTER(&htim1);
+		fst.position = __HAL_TIM_GET_COUNTER(&htim2);
 		fst.speed = fst.position - fst.old_position;
 		fst.speed_rpm = (fst.speed * 60) / TICKS_PER_REVOLUTION;
 		fst.speed_rad = (fst.speed_rpm / 60) * 2 * M_PI;
 		fst.old_position = fst.position;
 
 		//sdr
-		sdr.position = __HAL_TIM_GET_COUNTER(&htim1);
+		sdr.position = __HAL_TIM_GET_COUNTER(&htim3);
 		sdr.speed = sdr.position - sdr.old_position;
 		sdr.speed_rpm = (sdr.speed * 60) / TICKS_PER_REVOLUTION;
 		sdr.speed_rad = (sdr.speed_rpm / 60) * 2 * M_PI;
 		sdr.old_position = sdr.position;
 
 		//sst
-		sst.position = __HAL_TIM_GET_COUNTER(&htim1);
+		sst.position = __HAL_TIM_GET_COUNTER(&htim5);
 		sst.speed = sst.position - sst.old_position;
 		sst.speed_rpm = (sst.speed * 60) / TICKS_PER_REVOLUTION;
 		sst.speed_rad = (sst.speed_rpm / 60) * 2 * M_PI;
 		sst.old_position = sst.position;
-		small_counter++;
-	}
-	if(htim == &htim12){
-//		process_data();
-//		HAL_UART_Transmit(&huart2, (uint8_t *) tx_buffer, 25, HAL_MAX_DELAY);
-//		big_counter++;
+
+		process_data();
+		HAL_UART_Transmit_DMA(&huart3, (uint8_t*) tx_buffer, 25);
+
 	}
 }
 
-
-int delay = 1000;
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
-//	if(huart == &huart2){
+/** UART CALLBACKS */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart == &huart3) {
 //		process_data();
-//		HAL_UART_Transmit_DMA(&huart2, (uint8_t*) tx_buffer,25);
-//		big_counter++;
-//		HAL_Delay(delay);
-//	}
+//		HAL_UART_Transmit_DMA(&huart3, (uint8_t *) tx_buffer, 25);
+	}
 }
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 	if (huart == &huart2) { //ESP32
-		HAL_UART_Receive_DMA(&huart2, controller_buffer, 15);
+		HAL_UART_Receive_DMA(&huart2, controller_buffer, MAX_CONTROLLER_SIZE);
 		int joystick_values[3];
 		int index = 0;
 		char *token;
@@ -272,7 +349,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 		ps4.x = joystick_values[2]; //ry - x
 	}
 	if (huart == &huart6) { //BLUEPILL
-		HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
+		HAL_UART_Receive_DMA(&huart6, odometry_buffer, MAX_ODOMETRY_SIZE);
 		double coordinates[3];
 		int index = 0;
 		char *token;
@@ -282,18 +359,48 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 			coordinates[index++] = strtod(token, NULL);
 			token = strtok(NULL, ",");
 		}
-		current_x = (double) ((int) (coordinates[0] * 100)) / 100;
-		current_y = (double) ((int) (coordinates[1] * 100)) / 100;
-		current_h = (double) ((int) (coordinates[2] * 100)) / 100;
-//		process_data();
-//		HAL_UART_Transmit(&huart2, (uint8_t*) tx_buffer,25, HAL_MAX_DELAY);
+		odometer.current_x = (double) ((int) (coordinates[0] * 100)) / 100;
+		odometer.current_y = (double) ((int) (coordinates[1] * 100)) / 100;
+		odometer.current_h = (double) ((int) (coordinates[2] * 100)) / 100;
 	}
-	if (huart == &huart3) {
-		HAL_UART_Receive_DMA(&huart3, live_follower_buffer, 25);
+	if (huart == &huart3) { //HC-05
+		HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+		double trajectory[3];
+		int index = 0;
+		char *token;
+
+		token = strtok((char*) trajectory_buffer, ",");
+		if (strcmp(token, "L") == 0) {
+			//ne pregatim sa primim date pentru live follower
+			live_follower.in_teleop_mode = false;
+			live_follower.in_live_mode = true;
+			live_follower.is_stopped = false;
+		} else if (strcmp(token, "T") == 0) {
+			//ne pregatim sa primim date pentru teleop
+			live_follower.in_teleop_mode = true;
+			live_follower.in_live_mode = false;
+			live_follower.is_stopped = false;
+		} else if (strcmp(token, "S") == 0) {
+			//ne pregatim sa primim date pentru stop
+			live_follower.in_teleop_mode = false;
+			live_follower.in_live_mode = false;
+			live_follower.is_stopped = true;
+		}
+
+		if (strcmp(token, "L") != 0 && strcmp(token, "T") != 0) {
+			while (token != NULL && index < 3) {
+				trajectory[index++] = strtod(token, NULL);
+				token = strtok(NULL, ",");
+			}
+			live_follower.target_x = trajectory[0];
+			live_follower.target_y = trajectory[1];
+		}
 	}
 }
+/***************************************
+ ********* MOVEMENT FUNCTIONS **********
+ ***************************************/
 
-//MOTORS MOVEMENT
 void fdr_set_pwm(int32_t pwm_value) {
 	if (pwm_value > 0) {
 		TIM4->CCR3 = 0; // L
@@ -342,11 +449,11 @@ void sst_set_pwm(int32_t pwm_value) {
 		TIM8->CCR2 = 0; // L
 	}
 }
-void run_motors(double fdr_rpm, double sdr_rpm, double fst_rpm, double sst_rpm) {
-	fdr_set_pwm(rpm2pwm(fdr_rpm));
-	sdr_set_pwm(rpm2pwm(sdr_rpm));
-	fst_set_pwm(rpm2pwm(fst_rpm));
-	sst_set_pwm(rpm2pwm(sst_rpm));
+void run_motors(double fdr_rpm_ref, double sdr_rpm_ref, double fst_rpm_ref, double sst_rpm_ref) {
+	fdr_set_pwm(computeCommand(&fdr_controller, rpm2pwm(fdr_rpm_ref), fdr.speed));
+	sdr_set_pwm(computeCommand(&sdr_controller, rpm2pwm(sdr_rpm_ref), sdr.speed));
+	fst_set_pwm(computeCommand(&fst_controller, rpm2pwm(fst_rpm_ref), fst.speed));
+	sst_set_pwm(computeCommand(&sst_controller, rpm2pwm(sst_rpm_ref), sst.speed));
 }
 void stop_motors() {
 	fdr_set_pwm(0);
@@ -354,31 +461,115 @@ void stop_motors() {
 	fst_set_pwm(0);
 	sst_set_pwm(0);
 }
-/*TODO: Implement wait for start
- * Do i even need wait for start?*/
-void wait_for_start() {
-	while (1) {
-		/*TODO: Power a led to know that you are in waiting mode*/
-		/*TODO: Implement beaking condition*/
-//		if (HAL_GPIO_ReadPin(GPIOF, GPIO_PIN_7)) {
-//			fdr(0);
-//			sdr(0);
-//			fst(0);
-//			sst(0);
-//			break;
-//		}
+
+void compute_wheel_speeds(double Vx, double Vy, double Wz) {
+	//pentru directia rotilor ne luam dupa asta https://www.itm-conferences.org/articles/itmconf/pdf/2020/05/itmconf_itee2020_04001.pdf
+	wheels.fst = ((1 / R) * (Vx - Vy - ((LX + LY) * Wz))) / 40;
+	wheels.fdr = ((1 / R) * (Vx + Vy + ((LX + LY) * Wz))) / 40;
+	wheels.sst = ((1 / R) * (Vx + Vy - ((LX + LY) * Wz))) / 40;
+	wheels.sdr = ((1 / R) * (Vx - Vy + ((LX + LY) * Wz))) / 40;
+
+	wheels.max_speed = fmax(fmax(fabs(wheels.fst), fabs(wheels.fdr)),
+			fmax(fabs(wheels.sst), fabs(wheels.sdr)));
+
+	if (wheels.max_speed > MAX_SPEED) {
+		wheels.scale_factor = fabs(MAX_SPEED / wheels.max_speed);
+		wheels.fst *= wheels.scale_factor;
+		wheels.fdr *= wheels.scale_factor;
+		wheels.sst *= wheels.scale_factor;
+		wheels.sdr *= wheels.scale_factor;
+
+	} else if (wheels.max_speed < MIN_SPEED) {
+		wheels.scale_factor = fabs(MIN_SPEED / wheels.max_speed);
+		wheels.fst *= wheels.scale_factor;
+		wheels.fdr *= wheels.scale_factor;
+		wheels.sst *= wheels.scale_factor;
+		wheels.sdr *= wheels.scale_factor;
+	}
+
+	wheels.fst = rad2rpm(wheels.fst);
+	wheels.fdr = rad2rpm(wheels.fdr);
+	wheels.sst = rad2rpm(wheels.sst);
+	wheels.sdr = rad2rpm(wheels.sdr);
+}
+
+double Vx = 0, Vy = 0, W = 0;
+void go_to_target_point(double final_x, double final_y, double angular_velocity) {
+	HAL_UART_Receive_DMA(&huart6, odometry_buffer, MAX_ODOMETRY_SIZE);
+	while (true) {
+		//To know when to exit the loop
+		HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+
+		Vx = final_x - odometer.current_x;
+		Vy = final_y - odometer.current_y;
+		W = angular_velocity;
+		double distance_to_target = sqrt(Vx * Vx + Vy * Vy);
+
+		if (distance_to_target < DISTANCE_THRESHOLD
+				|| live_follower.is_stopped) {
+			break;
+		}
+
+		compute_wheel_speeds(Vx, Vy, W);
+		run_motors(wheels.fdr, wheels.sdr, wheels.fst, wheels.sst);
+	}
+	stop_motors();
+}
+
+/***************************************
+ ************ OP MODES *****************
+ ***************************************/
+
+//HARDCODED TRAJECTORY
+double points[NUM_OF_POINTS][3] = { { 50, 50.0, 0.0 }, { -50, 40.0, 0.0 }, {
+		-50.0, -40.0, 0.0 }, { 50.0, -50.0, 0.0 }, { 0.0, 0.0, 0.0 } };
+
+int visited[NUM_OF_POINTS] = { 0, 0, 0, 0, 0 };
+void auto_op_mode() {
+	HAL_UART_Receive_DMA(&huart6, odometry_buffer, MAX_ODOMETRY_SIZE);
+	for (int i = 0; i < NUM_OF_POINTS; i++) {
+		if (!visited[i]) {
+			go_to_target_point(points[i][0], points[i][1], points[i][2]);
+			visited[i] = 1;
+		}
 	}
 }
 
+
+void live_op_mode() {
+	HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+	live_follower.last_target_x = 0;
+	live_follower.last_target_y = 0;
+
+	while (live_follower.in_live_mode || !live_follower.is_stopped) {
+		//To know when to exit the live op mode
+		HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+
+		if (live_follower.target_x != live_follower.last_target_x
+				|| live_follower.target_y != live_follower.last_target_y)
+			go_to_target_point(live_follower.target_x, live_follower.target_y,
+					0);
+
+		live_follower.last_target_x = live_follower.target_x;
+		live_follower.last_target_y = live_follower.target_y;
+	}
+
+	if (live_follower.is_stopped) {
+		stop_motors();
+	}
+}
 void tele_op_mode() {
 	int32_t fdr_pwm = 0, sdr_pwm = 0, fst_pwm = 0, sst_pwm = 0;
 	double fdr_ref = 0, sdr_ref = 0, fst_ref = 0, sst_ref = 0;
-	HAL_UART_Receive_DMA(&huart2, controller_buffer, 15);
+	HAL_UART_Receive_DMA(&huart2, controller_buffer, MAX_CONTROLLER_SIZE);
 	//lx - ps4.w
 	//rx - ps4.y
 	//ry - ps4.x
-	while (1) {
-		HAL_UART_Receive_DMA(&huart2, controller_buffer, 15);
+	while (live_follower.in_teleop_mode || !live_follower.is_stopped) {
+		//To know when to exit the teleop mode
+		HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+
+		HAL_UART_Receive_DMA(&huart2, controller_buffer, MAX_CONTROLLER_SIZE);
 		fdr_ref = map(-ps4.x, -512, 512, -1, 1) + map(-ps4.y, -512, 512, -1, 1)
 				+ map(-ps4.w, -512, 512, -1, 1);
 		sdr_ref = map(-ps4.x, -512, 512, -1, 1) - map(-ps4.y, -512, 512, -1, 1)
@@ -418,125 +609,38 @@ void tele_op_mode() {
 		sdr_set_pwm(sdr_pwm);
 		fst_set_pwm(fst_pwm);
 		sst_set_pwm(sst_pwm);
-
-		/*TODO: Implement beaking condition*/
-//		if(conditie){
-//			break;
-//		}
+	}
+	if (live_follower.is_stopped) {
+		stop_motors();
 	}
 }
-//double points[3][2] = { { 1.6, 0.0 }, { 1.6, -1.1 }, { 0.0, -1.1 } };
-//double speeds[3][4] = { { 35, 35, 35, 35 }, { 35, -35, -35, 35 }, { -35, -35, -35, -35 } };
-double final_x = 0, final_y = 0;
-double points[NUM_OF_POINTS][2] = { { 100, 0.0 },
-						{ 100, 100.0 },
-                        { 0.0, 100.0 },
-                        { 0.0, 0.0 }};
-
-int visited[NUM_OF_POINTS] = {0, 0, 0, 0};
-
-WHEELS wheels;
-void compute_wheel_speeds(double Vx, double Vy, double Wz){
-	//pentru directia rotilor ne luam dupa asta https://www.itm-conferences.org/articles/itmconf/pdf/2020/05/itmconf_itee2020_04001.pdf
-	wheels.fst = ((1 / R) * (Vx - Vy - ((LX + LY) * Wz))) / 40;
-	wheels.fdr = ((1 / R) * (Vx + Vy + ((LX + LY) * Wz))) / 40;
-	wheels.sst = ((1 / R) * (Vx + Vy - ((LX + LY) * Wz))) / 40;
-	wheels.sdr = ((1 / R) * (Vx - Vy + ((LX + LY) * Wz))) / 40;
-
-	wheels.max_speed = fmax(fmax(fabs(wheels.fst), fabs(wheels.fdr)), fmax(fabs(wheels.sst), fabs(wheels.sdr)));
-	if( wheels.max_speed > MAX_SPEED){
-		wheels.scale_factor = fabs(MAX_SPEED / wheels.max_speed);
-		wheels.fst *= wheels.scale_factor;
-		wheels.fdr *= wheels.scale_factor;
-		wheels.sst *= wheels.scale_factor;
-		wheels.sdr *= wheels.scale_factor;
-	}else if(wheels.max_speed < MIN_SPEED){
-		wheels.scale_factor = fabs(MIN_SPEED / wheels.max_speed);
-		wheels.fst *= wheels.scale_factor;
-		wheels.fdr *= wheels.scale_factor;
-		wheels.sst *= wheels.scale_factor;
-		wheels.sdr *= wheels.scale_factor;
-
-	}
-
-	wheels.fst = rad2rpm(wheels.fst);
-	wheels.fdr = rad2rpm(wheels.fdr);
-	wheels.sst = rad2rpm(wheels.sst);
-	wheels.sdr = rad2rpm(wheels.sdr);
-
-
+double fdr_getDistance() {
+	return (10 * M_PI * fdr.position) / 1120; // ticks to cm
 }
-/*TODO: Movement error corection*/
-double Vx = 0, Vy = 0;
-void follow_line(double final_x, double final_y) {
-	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
-	while (true) {
-		Vx = final_x - current_x;
-		Vy = final_y - current_y;
+void identificare(){
+	while(fdr_getDistance() < 200)
+	{
+		fst_set_pwm(65535/2);
+		sst_set_pwm(65535/2);
+		fdr_set_pwm(65535/2);
+		sdr_set_pwm(65535/2);
 
-		double distance_to_target = sqrt(Vx * Vx + Vy * Vy);
-
-		if (distance_to_target < DISTANCE_THRESHOLD) {
-			break;
-		}
-
-		compute_wheel_speeds(Vx, Vy, 0);
-		run_motors(wheels.fdr, wheels.sdr, wheels.fst, wheels.sst);
+		sprintf(msg, "Referinta(PWM): %ld, FDR Speed(RPM): %f, FDR Speed(i/r): %ld, Time(s): %f \r\n", TIM4->CCR4, fdr.speed_rpm*10, fdr.speed, time/1000.0);
+		HAL_UART_Transmit(&huart3, (uint8_t*) msg, strlen(msg), HAL_MAX_DELAY);
 	}
+	while (fdr_getDistance() < 400) {
+		fst_set_pwm(65535);
+		sst_set_pwm(65535);
+		fdr_set_pwm(65535);
+		sdr_set_pwm(65535);
+
+		sprintf(msg, "Referinta(PWM): %ld, FDR Speed(RPM): %f, FDR Speed(i/r): %ld, Time(s): %f \r\n", TIM4->CCR4, fdr.speed_rpm*10, fdr.speed, time/1000.0);
+		HAL_UART_Transmit(&huart3, (uint8_t*) msg, strlen(msg), HAL_MAX_DELAY);
+	}
+	sprintf(msg, "Referinta(PWM): %ld, FDR Speed(RPM): %f, FDR Speed(i/r): %ld, Time(s): %f \r\n", TIM4->CCR4, fdr.speed_rpm*10, fdr.speed, time/1000.0);
+	HAL_UART_Transmit(&huart3, (uint8_t*) msg, strlen(msg), HAL_MAX_DELAY);
 	stop_motors();
 }
-
-void follow_trajectory() {
-	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
-	for (int i = 0; i < NUM_OF_POINTS; i++) {
-		if(!visited[i]){
-			follow_line(points[i][0], points[i][1]);
-			visited[i] = 1;
-		}
-	}
-}
-/*TODO: Heading locking*/
-//double Kp = 0.2;
-//int32_t output = 0;
-//double error = 0;
-//double ref = 90;
-//int err_threshold = 5;
-//void lock_heading(double ref){
-//	error = abs(ref) - abs(current_h);
-//	if(ref < 0){
-//		output = map(Kp * error,-36,0,-65535,15000);
-//		if(output < -65535) output = -65535;
-//		if(error < err_threshold && error > -err_threshold) output = 0;
-//		rotate_right(output);
-//	}else if(ref > 0){
-//		output = map(Kp * error,0,36,15000,65535);
-//		if(output > 65535) output = 65535;
-//		if(error < err_threshold && error > -err_threshold) output = 0;
-//		rotate_left(output);
-//	}
-//
-//}
-/*TODO: Implement auto_op_mode*/
-void auto_op_mode() {
-	//variabile
-	while (1) {
-
-		/*TODO: Implement beaking condition*/
-//		if(conditie){
-//			break;
-//		}
-	}
-}
-int x = 0;
-double las_time = 0;
-void send_data(){
-	las_time = HAL_GetTick();
-	if(HAL_GetTick() - las_time == 500){
-		process_data();
-		HAL_UART_Transmit(&huart2, (uint8_t *) tx_buffer, 25, HAL_MAX_DELAY);
-	}
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -604,39 +708,44 @@ int main(void)
 	MOTOR_Init(&sdr);
 	MOTOR_Init(&sst);
 	Controller_Init(&ps4);
-	Wheels__Init(&wheels);
+	Wheels_Init(&wheels);
+	LIVE_FOLLOWER_Init(&live_follower);
+	ODO_Init(&odometer);
 
+	//RECEIVE DATA FROM BLUEPILL
 	HAL_UART_Receive_DMA(&huart6, odometry_buffer, 25);
-	HAL_UART_Receive_DMA(&huart3, live_follower_buffer, 15);
-//	process_data();
-//	HAL_UART_Transmit_DMA(&huart2, (uint8_t *) tx_buffer, 25);
-//	follow_trajectory();
+
+	//RECEIVE DATA FROM HC-05 merge
+	HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+
+	//TRANSMIT DATA TO HC-05
+	process_data();
+
+	PID_Init(&fdr_controller, 1, 1, 0);
+	PID_Init(&fst_controller, 1, 1, 0);
+	PID_Init(&sdr_controller, 1, 1, 0);
+	PID_Init(&sst_controller, 1, 1, 0);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	/*TODO: Implement mode switching*/
-
 	while (1) {
-		follow_trajectory();
-//		process_data();
-//		sprintf(msg, "e alo %d \r\n", x);
-//		HAL_UART_Transmit(&huart2, (uint8_t *) tx_buffer, 25, HAL_MAX_DELAY);
-//		send_data();
-//		x++;
-//		HAL_Delay(delay);
-//		lock_heading(ref);
-//		tele_op_mode();
-//		if (HAL_GPIO_ReadPin(GPIOF, GPIO_PIN_7)) {
-//			//TELEOP
-//			tele_op_mode();
-//		} else if (HAL_GPIO_ReadPin(GPIOF, GPIO_PIN_8)) {
-//			//AUTO OP MODE
-//			follow_trajectory();
-//		} else if (HAL_GPIO_ReadPin(GPIOF, GPIO_PIN_9)) {
-//			//wait
-//		}
+
+		//RECEIVE DATA FROM HC-05 merge
+		HAL_UART_Receive_DMA(&huart3, trajectory_buffer, MAX_TRAJECTORY_SIZE);
+
+		if (live_follower.is_stopped) {
+			stop_motors();
+
+		} else if (live_follower.in_teleop_mode) {
+			//TELEOP
+			tele_op_mode();
+
+		} else if (!live_follower.in_teleop_mode) {
+			//AUTO OP MODE
+			live_op_mode();
+		}
 
     /* USER CODE END WHILE */
 
@@ -1091,9 +1200,9 @@ static void MX_TIM9_Init(void)
 
   /* USER CODE END TIM9_Init 1 */
   htim9.Instance = TIM9;
-  htim9.Init.Prescaler = 146;
+  htim9.Init.Prescaler = 999;
   htim9.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim9.Init.Period = 65535;
+  htim9.Init.Period = 9599;
   htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim9.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim9) != HAL_OK)
@@ -1329,6 +1438,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Stream1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
   /* DMA1_Stream5_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
